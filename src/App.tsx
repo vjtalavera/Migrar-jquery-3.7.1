@@ -52,7 +52,7 @@ const allowedExtensions = [
   '.htm'
 ]
 
-const maxFindingsPerFile = 500
+const maxFindingsPerFile = Number.POSITIVE_INFINITY
 
 const folderInputProps =
   { webkitdirectory: '' } as InputHTMLAttributes<HTMLInputElement> & {
@@ -264,8 +264,10 @@ export default function App() {
 
   const handleSelection = (fileList: FileList | null) => {
     if (!fileList) return
-    const next = mergeFiles(selectedFiles, Array.from(fileList))
-    setSelectedFiles(next)
+    setSelectedFiles(Array.from(fileList))
+    setResults([])
+    setStats(null)
+    setLastScanAt(null)
   }
 
   const clearSelection = () => {
@@ -443,7 +445,8 @@ export default function App() {
         </div>
         <div className="inputs">
           <label className="input-card">
-            <span>Carpeta completa</span>
+            <span className="input-card-label">Carpeta completa</span>
+            <span className="input-card-action">Seleccionar carpeta</span>
             <input
               type="file"
               {...folderInputProps}
@@ -451,7 +454,8 @@ export default function App() {
             />
           </label>
           <label className="input-card">
-            <span>Archivos individuales</span>
+            <span className="input-card-label">Archivos individuales</span>
+            <span className="input-card-action">Elegir archivos</span>
             <input
               type="file"
               multiple
@@ -467,10 +471,6 @@ export default function App() {
           <div>
             <p className="label">Extensiones soportadas</p>
             <p>{allowedExtensions.join(', ')}</p>
-          </div>
-          <div>
-            <p className="label">Limite por archivo</p>
-            <p>{maxFindingsPerFile} hallazgos</p>
           </div>
         </div>
       </section>
@@ -648,6 +648,10 @@ export default function App() {
                                       </div>
                                       <div className="included-issue-line included-issue-rule">
                                         Incidencia: {finding.rule.label}
+                                      </div>
+                                      <div className="included-issue-line included-issue-solution">
+                                        Solucion:{' '}
+                                        {finding.rule.replacement ?? 'No hay reemplazo oficial indicado.'}
                                       </div>
                                     </div>
                                   ))}
