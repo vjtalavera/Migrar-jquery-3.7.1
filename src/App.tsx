@@ -529,11 +529,7 @@ export default function App() {
   )
 
   useEffect(() => {
-    if (results.length === 0) {
-      setExpandedFiles(new Set())
-      return
-    }
-    setExpandedFiles(new Set(results.map((result) => result.filePath)))
+    setExpandedFiles(new Set())
   }, [results])
 
   const toggleFile = (filePath: string) => {
