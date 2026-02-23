@@ -1,6 +1,7 @@
 export type DeprecationRule = {
   id: string
   label: string
+  kind?: 'deprecated' | 'recommended'
   type:
     | 'method'
     | 'property'
@@ -268,6 +269,54 @@ const rawRules: RawRule[] = [
     categoryUrl: 'https://api.jquery.com/category/deprecated/deprecated-3.0/',
     replacement: 'Use .off() instead.',
     replacementUrl: 'https://api.jquery.com/off/'
+  },
+  {
+    id: 'off-handler-removal',
+    label: '.off()',
+    kind: 'recommended',
+    type: 'event',
+    deprecated: '1.7',
+    pattern: String.raw`\.off\s*\(`,
+    docsUrl: 'https://api.jquery.com/off/',
+    categoryUrl: 'https://api.jquery.com/off/',
+    replacement: 'Use .off() to remove handlers attached with .on().',
+    replacementUrl: 'https://api.jquery.com/off/'
+  },
+  {
+    id: 'attr-boolean-property',
+    label: '.attr("disabled|checked|selected")',
+    kind: 'recommended',
+    type: 'property',
+    deprecated: '1.6',
+    pattern: String.raw`\.attr\s*\(\s*(['"])(?:disabled|checked|selected)\1`,
+    docsUrl: 'https://api.jquery.com/attr/',
+    categoryUrl: 'https://api.jquery.com/attr/',
+    replacement: 'Use .prop(...) for disabled, checked and selected states.',
+    replacementUrl: 'https://api.jquery.com/prop/'
+  },
+  {
+    id: 'ready-event-on',
+    label: '.on("ready", handler)',
+    type: 'event',
+    deprecated: '1.8',
+    removed: '3.0',
+    pattern: String.raw`\.on\s*\(\s*(['"])ready\1`,
+    docsUrl: 'https://api.jquery.com/ready/',
+    categoryUrl: 'https://api.jquery.com/category/deprecated/deprecated-1.8/',
+    replacement: 'Use your jQuery alias as a function (e.g. $jq(handler)).',
+    replacementUrl: 'https://api.jquery.com/ready/'
+  },
+  {
+    id: 'ready-method-equivalent',
+    label: '$(document).ready(handler)',
+    kind: 'recommended',
+    type: 'event',
+    deprecated: '3.0',
+    pattern: String.raw`(?:\$jq|\$|jQuery|JQuery)\s*\(\s*document\s*\)\s*\.ready\s*\(`,
+    docsUrl: 'https://api.jquery.com/ready/',
+    categoryUrl: 'https://api.jquery.com/ready/',
+    replacement: 'Use $jq(function() { ... }) as the recommended equivalent form.',
+    replacementUrl: 'https://api.jquery.com/ready/'
   },
   {
     id: 'parseJSON',

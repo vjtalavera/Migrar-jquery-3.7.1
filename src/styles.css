@@ -211,7 +211,7 @@ h2 {
   background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
   cursor: pointer;
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
   overflow: hidden;
 }
 
@@ -225,7 +225,6 @@ h2 {
 }
 
 .input-card:hover {
-  transform: translateY(-2px);
   box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
   border-color: #cbd5e1;
 }
@@ -445,8 +444,44 @@ button.small {
   align-items: start;
 }
 
-.result-body.is-single {
-  grid-template-columns: 1fr;
+.code-viewer-section {
+  margin-top: 6px;
+  display: grid;
+  gap: 4px;
+}
+
+.code-viewer {
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  max-height: 8rem;
+  overflow: auto;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 11px;
+}
+
+.code-line {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 8px;
+  padding: 1px 8px;
+  line-height: 1.45;
+}
+
+.code-line.is-active {
+  background: rgba(217, 119, 6, 0.22);
+}
+
+.code-line-number {
+  color: #94a3b8;
+  text-align: right;
+  user-select: none;
+  padding-right: 8px;
+}
+
+.code-line-text {
+  white-space: pre;
 }
 
 .result-findings {
@@ -479,7 +514,7 @@ button.small {
 .included-list {
   margin: 0;
   display: grid;
-  gap: 2px;
+  gap: 8px;
 }
 
 .included-item {
@@ -506,14 +541,17 @@ button.small {
 .included-findings {
   margin: 0;
   display: grid;
-  gap: 1px;
-  padding-left: 3px;
+  gap: 8px;
+  padding-left: 6px;
+  border-left: 1px dashed rgba(148, 163, 184, 0.45);
 }
 
 .included-issue {
   display: grid;
-  gap: 1px;
-  margin-left: 0;
+  gap: 4px;
+  margin-left: 4px;
+  padding-left: 4px;
+  border-left: 1px dotted rgba(148, 163, 184, 0.35);
 }
 
 .included-issue-line {
@@ -532,18 +570,21 @@ button.small {
 }
 
 .included-issue-path {
+  margin-left: 8px;
   background: linear-gradient(90deg, rgba(254, 249, 195, 0.85), rgba(254, 252, 232, 0.6));
   color: #854d0e;
   border-color: rgba(250, 204, 21, 0.25);
 }
 
 .included-issue-rule {
+  margin-left: 16px;
   background: linear-gradient(90deg, rgba(254, 226, 226, 0.85), rgba(255, 241, 242, 0.6));
   color: #7f1d1d;
   border-color: rgba(248, 113, 113, 0.25);
 }
 
 .included-issue-solution {
+  margin-left: 16px;
   background: linear-gradient(90deg, rgba(220, 252, 231, 0.85), rgba(240, 253, 244, 0.6));
   color: #166534;
   border-color: rgba(34, 197, 94, 0.25);
@@ -554,6 +595,15 @@ button.small {
   border-radius: 12px;
   background: #f7f7f7;
   border: 1px solid #e5e7eb;
+}
+
+.finding-jump {
+  cursor: pointer;
+}
+
+.finding-jump:focus-visible {
+  outline: 2px solid rgba(217, 119, 6, 0.8);
+  outline-offset: 1px;
 }
 
 .finding p {

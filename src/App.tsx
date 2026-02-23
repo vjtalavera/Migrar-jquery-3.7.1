@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { InputHTMLAttributes } from 'react'
 import { deprecationRules, DeprecationRule } from './data/deprecations'
 
@@ -12,20 +12,11 @@ type Finding = {
   rule: DeprecationRule
 }
 
-type JQueryUsage = {
-  filePath: string
-  fileName: string
-  line: number
-  column: number
-  lineText: string
-  matchText: string
-}
-
 type ScanResult = {
   filePath: string
   fileName: string
   findings: Finding[]
-  jqueryUsages: JQueryUsage[]
+  fileLines: string[]
   includes: IncludeEntry[]
 }
 
@@ -33,7 +24,6 @@ type ScanStats = {
   scannedFiles: number
   skippedFiles: number
   totalFindings: number
-  totalJQueryUsages: number
   uniqueRules: number
 }
 
@@ -57,10 +47,6 @@ type GroupedResult = Omit<ScanResult, 'findings'> & {
   findings: FindingWithSuggestion[]
 }
 
-type GroupedUsageResult = Omit<ScanResult, 'jqueryUsages'> & {
-  findings: JQueryUsage[]
-}
-
 type ProgressState = {
   phase: 'idle' | 'selecting' | 'scanning' | 'done'
   value: number
@@ -78,7 +64,7 @@ const allowedExtensions = [
 ]
 
 const maxFindingsPerFile = Number.POSITIVE_INFINITY
-const jqueryUsagePattern = String.raw`(?:\$jq|jQuery|JQuery)\s*(?:\(|\.)|\$\s*(?:\(|\.)|\$[A-Za-z_][\w$]*\s*\.`
+const preferredJQueryAlias = '$jq'
 
 const folderInputProps =
   { webkitdirectory: '' } as InputHTMLAttributes<HTMLInputElement> & {
@@ -157,35 +143,6 @@ function scanText(text: string, filePath: string, fileName: string) {
   return findings
 }
 
-function scanJQueryUsages(text: string, filePath: string, fileName: string) {
-  const lineStarts = buildLineIndex(text)
-  const usages: JQueryUsage[] = []
-
-  for (let lineIdx = 0; lineIdx < lineStarts.length; lineIdx += 1) {
-    if (usages.length >= maxFindingsPerFile) break
-    const start = lineStarts[lineIdx]
-    const end = lineIdx + 1 < lineStarts.length ? lineStarts[lineIdx + 1] - 1 : text.length
-    const lineText = text.slice(start, end).replace(/\r$/, '')
-    if (!isJQueryInstruction(lineText)) continue
-
-    const matches = lineText.matchAll(new RegExp(jqueryUsagePattern, 'g'))
-    for (const match of matches) {
-      if (match.index == null) continue
-      if (usages.length >= maxFindingsPerFile) break
-      usages.push({
-        filePath,
-        fileName,
-        line: lineIdx + 1,
-        column: match.index + 1,
-        lineText,
-        matchText: match[0]
-      })
-    }
-  }
-
-  return usages
-}
-
 function extractIncludedFiles(text: string) {
   const includes: IncludeEntry[] = []
   const seen = new Set<string>()
@@ -223,8 +180,18 @@ function extractIncludedFiles(text: string) {
   return includes
 }
 
+function toFileLines(text: string) {
+  return text.replace(/\r/g, '').split('\n')
+}
+
 function isJQueryInstruction(lineText: string) {
-  return new RegExp(jqueryUsagePattern).test(lineText)
+  const hasCoreCall =
+    /(?:^|[^\w$])(?:\$jq|jQuery|JQuery|\$)\s*(?:\(|\.)/.test(lineText)
+
+  const hasDollarObjectMethod =
+    /(?:^|[^\w$])\$[A-Za-z_][\w$]*\s*\./.test(lineText)
+
+  return hasCoreCall || hasDollarObjectMethod
 }
 
 function extractReplacementToken(replacement: string) {
@@ -294,9 +261,78 @@ function buildEqSelectorSuggestion(lineText: string) {
   return replaced === lineText ? null : replaced
 }
 
+function buildReadyOnSuggestion(lineText: string) {
+  const readyEventPattern = /\.on\s*\(\s*(['"])ready\1\s*,\s*([^)]+)\)/i
+  if (!readyEventPattern.test(lineText)) return null
+
+  const handlerMatch = lineText.match(readyEventPattern)
+  const handler = handlerMatch?.[2]?.trim()
+  if (handler) {
+    return `${preferredJQueryAlias}(${handler});`
+  }
+
+  return `${preferredJQueryAlias}(function() {`
+}
+
+function buildReadyMethodSuggestion(lineText: string) {
+  const readyMethodPattern =
+    /(?:\$jq|\$|jQuery|JQuery)\s*\(\s*document\s*\)\s*\.ready\s*\(/
+
+  if (!readyMethodPattern.test(lineText)) return null
+
+  const replaced = lineText.replace(readyMethodPattern, `${preferredJQueryAlias}(`)
+  return replaced === lineText ? null : replaced
+}
+
+function buildAttrPropSuggestion(lineText: string) {
+  const attrPropertyPattern = /\.attr\s*\(\s*(['"])(disabled|checked|selected)\1/i
+  if (!attrPropertyPattern.test(lineText)) return null
+
+  const replaced = lineText.replace(
+    attrPropertyPattern,
+    (_fullMatch, quote: string, propName: string) => `.prop(${quote}${propName}${quote}`
+  )
+  return replaced === lineText ? null : replaced
+}
+
+function buildEventShorthandSuggestion(lineText: string, matchText: string, rule: DeprecationRule) {
+  if (rule.type !== 'event' || !rule.replacement) return null
+  if (!rule.replacement.includes('.on(') || !rule.replacement.includes('.trigger(')) return null
+
+  const methodMatch = matchText.match(/\.([A-Za-z_$][\w$]*)\s*\(/)
+  if (!methodMatch) return null
+  const method = methodMatch[1]
+
+  const emptyCallPattern = new RegExp(`\\.${method}\\s*\\(\\s*\\)`)
+  if (emptyCallPattern.test(lineText)) {
+    return lineText.replace(emptyCallPattern, `.trigger('${method}')`)
+  }
+
+  const callPattern = new RegExp(`\\.${method}\\s*\\(`)
+  if (!callPattern.test(lineText)) return null
+  return lineText.replace(callPattern, `.on('${method}', `)
+}
+
 function getSuggestedLine({ lineText, matchText, rule }: SuggestionInput) {
   if (rule.id === 'selector-eq') {
     return buildEqSelectorSuggestion(lineText)
+  }
+  if (rule.id === 'off-handler-removal') {
+    return lineText
+  }
+  if (rule.id === 'attr-boolean-property') {
+    return buildAttrPropSuggestion(lineText)
+  }
+  if (rule.id === 'ready-event-on') {
+    return buildReadyOnSuggestion(lineText)
+  }
+  if (rule.id === 'ready-method-equivalent') {
+    return buildReadyMethodSuggestion(lineText)
+  }
+
+  const eventShorthandSuggestion = buildEventShorthandSuggestion(lineText, matchText, rule)
+  if (eventShorthandSuggestion) {
+    return eventShorthandSuggestion
   }
 
   if (!rule.replacement || rule.type === 'selector') return null
@@ -315,11 +351,12 @@ export default function App() {
   const [stats, setStats] = useState<ScanStats | null>(null)
   const [scanning, setScanning] = useState(false)
   const [lastScanAt, setLastScanAt] = useState<string | null>(null)
-  const [resultMode, setResultMode] = useState<'deprecated' | 'jquery-usage'>('deprecated')
   const [filterMode, setFilterMode] = useState<'with-findings' | 'all' | 'no-replacement'>(
     'with-findings'
   )
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(() => new Set())
+  const [activeLineByFile, setActiveLineByFile] = useState<Record<string, number>>({})
+  const codeViewerRefs = useRef(new Map<string, HTMLDivElement | null>())
   const [progress, setProgress] = useState<ProgressState>({
     phase: 'idle',
     value: 0,
@@ -338,6 +375,7 @@ export default function App() {
     setResults([])
     setStats(null)
     setLastScanAt(null)
+    setActiveLineByFile({})
     setProgress({
       phase: 'done',
       value: 100,
@@ -350,6 +388,7 @@ export default function App() {
     setResults([])
     setStats(null)
     setLastScanAt(null)
+    setActiveLineByFile({})
     setProgress({
       phase: 'idle',
       value: 0,
@@ -368,7 +407,6 @@ export default function App() {
 
     let skipped = 0
     let totalFindings = 0
-    let totalJQueryUsages = 0
     const scanResults: ScanResult[] = []
     const totalFiles = selectedFiles.length
 
@@ -389,11 +427,10 @@ export default function App() {
         const text = await file.text()
         const filePath = file.webkitRelativePath || file.name
         const findings = scanText(text, filePath, file.name)
-        const jqueryUsages = scanJQueryUsages(text, filePath, file.name)
+        const fileLines = toFileLines(text)
         const includes = extractIncludedFiles(text)
         totalFindings += findings.length
-        totalJQueryUsages += jqueryUsages.length
-        scanResults.push({ filePath, fileName: file.name, findings, jqueryUsages, includes })
+        scanResults.push({ filePath, fileName: file.name, findings, fileLines, includes })
       } catch {
         skipped += 1
       }
@@ -411,11 +448,11 @@ export default function App() {
     ).size
 
     setResults(scanResults)
+    setActiveLineByFile({})
     setStats({
       scannedFiles: scanResults.length,
       skippedFiles: skipped,
       totalFindings,
-      totalJQueryUsages,
       uniqueRules
     })
     setLastScanAt(new Date().toLocaleString())
@@ -440,10 +477,16 @@ export default function App() {
   const groupedResults = useMemo<GroupedResult[]>(() => {
     return results
       .map((result) => {
-        const findings: FindingWithSuggestion[] = result.findings.map((finding) => ({
-          ...finding,
-          suggestedLine: getSuggestedLine(finding)
-        }))
+        const findings: FindingWithSuggestion[] = [...result.findings]
+          .sort((a, b) => {
+            if (a.line !== b.line) return a.line - b.line
+            if (a.column !== b.column) return a.column - b.column
+            return a.rule.label.localeCompare(b.rule.label)
+          })
+          .map((finding) => ({
+            ...finding,
+            suggestedLine: getSuggestedLine(finding)
+          }))
 
         let filtered = findings
         if (filterMode === 'with-findings') {
@@ -461,22 +504,9 @@ export default function App() {
       .filter((result): result is GroupedResult => result != null)
   }, [filterMode, results])
 
-  const groupedUsageResults = useMemo<GroupedUsageResult[]>(() => {
-    return results
-      .map((result) => {
-        if (result.jqueryUsages.length === 0) return null
-        return { ...result, findings: result.jqueryUsages }
-      })
-      .filter((result): result is GroupedUsageResult => result != null)
-  }, [results])
-
-  const activeResults = resultMode === 'deprecated' ? groupedResults : groupedUsageResults
-
   const hasScan = results.length > 0
   const emptyMessage = hasScan
-    ? resultMode === 'deprecated'
-      ? 'No hay incidencias para el filtro seleccionado.'
-      : 'No se detecto uso de jQuery en los archivos analizados.'
+    ? 'No hay incidencias para el filtro seleccionado.'
     : 'No hay resultados aun. Selecciona archivos y ejecuta el escaneo.'
 
   const includeLabel = (include: IncludeEntry) =>
@@ -494,8 +524,8 @@ export default function App() {
   }
 
   const visibleFilePaths = useMemo(
-    () => activeResults.map((result) => result.filePath),
-    [activeResults]
+    () => groupedResults.map((result) => result.filePath),
+    [groupedResults]
   )
 
   useEffect(() => {
@@ -524,6 +554,21 @@ export default function App() {
 
   const collapseAll = () => {
     setExpandedFiles(new Set())
+  }
+
+  const setCodeViewerRef = (filePath: string, element: HTMLDivElement | null) => {
+    codeViewerRefs.current.set(filePath, element)
+  }
+
+  const jumpToLine = (filePath: string, line: number) => {
+    const viewer = codeViewerRefs.current.get(filePath)
+    if (!viewer) return
+
+    const lineElement = viewer.querySelector<HTMLElement>(`[data-code-line="${line}"]`)
+    if (!lineElement) return
+
+    lineElement.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    setActiveLineByFile((prev) => ({ ...prev, [filePath]: line }))
   }
 
   return (
@@ -621,10 +666,6 @@ export default function App() {
             <p>{stats?.totalFindings ?? 0}</p>
           </div>
           <div>
-            <p className="label">Uso jQuery detectado</p>
-            <p>{stats?.totalJQueryUsages ?? 0}</p>
-          </div>
-          <div>
             <p className="label">Reglas unicas</p>
             <p>{stats?.uniqueRules ?? 0}</p>
           </div>
@@ -637,27 +678,6 @@ export default function App() {
           <div className="panel-controls">
             <div className="panel-filter">
               <span className="muted panel-filter-title">Mostrar</span>
-              <div className="filter-options" role="radiogroup" aria-label="Tipo de hallazgo">
-                <label className={`filter-option ${resultMode === 'deprecated' ? 'is-active' : ''}`}>
-                  <input
-                    type="radio"
-                    name="result-mode"
-                    checked={resultMode === 'deprecated'}
-                    onChange={() => setResultMode('deprecated')}
-                  />
-                  <span>Deprecaciones</span>
-                </label>
-                <label className={`filter-option ${resultMode === 'jquery-usage' ? 'is-active' : ''}`}>
-                  <input
-                    type="radio"
-                    name="result-mode"
-                    checked={resultMode === 'jquery-usage'}
-                    onChange={() => setResultMode('jquery-usage')}
-                  />
-                  <span>Uso jQuery detectado</span>
-                </label>
-              </div>
-              {resultMode === 'deprecated' && (
               <div className="filter-options" role="radiogroup" aria-label="Mostrar resultados">
                 <label className={`filter-option ${filterMode === 'with-findings' ? 'is-active' : ''}`}>
                   <input
@@ -687,14 +707,13 @@ export default function App() {
                   <span>Sin reemplazo oficial</span>
                 </label>
               </div>
-              )}
             </div>
             <div className="panel-toggle">
               <button
                 className="ghost small"
                 type="button"
                 onClick={expandAll}
-                disabled={activeResults.length === 0}
+                disabled={groupedResults.length === 0}
               >
                 Desplegar todo
               </button>
@@ -702,7 +721,7 @@ export default function App() {
                 className="ghost small"
                 type="button"
                 onClick={collapseAll}
-                disabled={activeResults.length === 0}
+                disabled={groupedResults.length === 0}
               >
                 Recoger todo
               </button>
@@ -710,13 +729,12 @@ export default function App() {
           </div>
         </div>
         <div className="results">
-          {activeResults.length === 0 && (
+          {groupedResults.length === 0 && (
             <div className="empty">
               <p>{emptyMessage}</p>
             </div>
           )}
-          {resultMode === 'deprecated' &&
-            groupedResults.map((result: GroupedResult) => (
+          {groupedResults.map((result: GroupedResult) => (
             <div
               key={result.filePath}
               className={`result-group ${expandedFiles.has(result.filePath) ? 'is-open' : 'is-collapsed'}`}
@@ -740,6 +758,7 @@ export default function App() {
                 </span>
               </div>
               {expandedFiles.has(result.filePath) && (
+                <>
                 <div className="result-body">
                   <div className="result-findings">
                     {result.findings.length === 0 ? (
@@ -748,14 +767,30 @@ export default function App() {
                       </div>
                     ) : (
                       result.findings.map((finding: FindingWithSuggestion, index) => {
-                        const statusParts = [`Deprecado en ${finding.rule.deprecated}`]
-                        if (finding.rule.removed) {
+                        const statusParts = [
+                          finding.rule.kind === 'recommended'
+                            ? 'Recomendacion oficial'
+                            : `Deprecado en ${finding.rule.deprecated}`
+                        ]
+                        if (finding.rule.kind !== 'recommended' && finding.rule.removed) {
                           statusParts.push(`Obsoleto en ${finding.rule.removed}`)
                         }
                         statusParts.push(`Modulo: ${finding.rule.type}`)
 
                         return (
-                          <div key={`${result.filePath}-${finding.line}-${index}`} className="finding">
+                          <div
+                            key={`${result.filePath}-${finding.line}-${index}`}
+                            className="finding finding-jump"
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => jumpToLine(result.filePath, finding.line)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault()
+                                jumpToLine(result.filePath, finding.line)
+                              }
+                            }}
+                          >
                             <p>{statusParts.join(' | ')}</p>
                             <div className="finding-row">
                               <span className="finding-label finding-label-locate">
@@ -775,6 +810,32 @@ export default function App() {
                         )
                       })
                     )}
+                    <div className="code-viewer-section">
+                      <p className="included-title">ARCHIVO COMPLETO (SOLO LECTURA)</p>
+                      <div
+                        className="code-viewer"
+                        ref={(element) => setCodeViewerRef(result.filePath, element)}
+                      >
+                        {result.fileLines.length === 0 ? (
+                          <p className="muted">Archivo vacio.</p>
+                        ) : (
+                          result.fileLines.map((lineText, lineIndex) => {
+                            const lineNumber = lineIndex + 1
+                            const isActive = activeLineByFile[result.filePath] === lineNumber
+                            return (
+                              <div
+                                key={`${result.filePath}-code-${lineNumber}`}
+                                className={`code-line ${isActive ? 'is-active' : ''}`}
+                                data-code-line={lineNumber}
+                              >
+                                <span className="code-line-number">{lineNumber}</span>
+                                <span className="code-line-text">{lineText || ' '}</span>
+                              </div>
+                            )
+                          })
+                        )}
+                      </div>
+                    </div>
                   </div>
                   <aside className="included-section">
                     <p className="included-title">ARCHIVOS INCLUIDOS</p>
@@ -820,54 +881,7 @@ export default function App() {
                     )}
                   </aside>
                 </div>
-              )}
-            </div>
-          ))}
-          {resultMode === 'jquery-usage' &&
-            groupedUsageResults.map((result: GroupedUsageResult) => (
-            <div
-              key={result.filePath}
-              className={`result-group ${expandedFiles.has(result.filePath) ? 'is-open' : 'is-collapsed'}`}
-            >
-              <div
-                className="result-header"
-                role="button"
-                tabIndex={0}
-                onClick={() => toggleFile(result.filePath)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    toggleFile(result.filePath)
-                  }
-                }}
-              >
-                <span className="result-path">Ruta: {result.filePath}</span>
-                <span className="result-count">
-                  {result.findings.length} uso{result.findings.length === 1 ? '' : 's'}
-                </span>
-              </div>
-              {expandedFiles.has(result.filePath) && (
-                <div className="result-body is-single">
-                  <div className="result-findings">
-                    {result.findings.map((finding: JQueryUsage, index) => (
-                      <div key={`${result.filePath}-${finding.line}-${index}`} className="finding">
-                        <p>Uso de jQuery detectado (no deprecado) | Modulo: usage</p>
-                        <div className="finding-row">
-                          <span className="finding-label finding-label-locate">
-                            Elemento localizado (linea {finding.line})
-                          </span>
-                          <span className="finding-label finding-label-suggest">
-                            Observacion
-                          </span>
-                        </div>
-                        <div className="finding-row">
-                          <span className="mono">{finding.lineText || finding.matchText}</span>
-                          <span className="mono">Sin reemplazo: esta linea no coincide con una deprecacion oficial.</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                </>
               )}
             </div>
           ))}
@@ -914,3 +928,4 @@ export default function App() {
     </div>
   )
 }
+
