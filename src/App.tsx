@@ -1,4 +1,4 @@
-﻿﻿﻿import { useEffect, useMemo, useState } from 'react'
+﻿import { useEffect, useMemo, useState } from 'react'
 import type { InputHTMLAttributes } from 'react'
 import { deprecationRules, DeprecationRule } from './data/deprecations'
 
@@ -42,6 +42,16 @@ type FindingWithSuggestion = Finding & {
   suggestedLine: string | null
 }
 
+type GroupedResult = Omit<ScanResult, 'findings'> & {
+  findings: FindingWithSuggestion[]
+}
+
+type ProgressState = {
+  phase: 'idle' | 'selecting' | 'scanning' | 'done'
+  value: number
+  label: string
+}
+
 const allowedExtensions = [
   '.js',
   '.jsx',
@@ -58,6 +68,12 @@ const folderInputProps =
   { webkitdirectory: '' } as InputHTMLAttributes<HTMLInputElement> & {
     webkitdirectory?: string
   }
+
+function waitForNextPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve())
+  })
+}
 
 function getExtension(name: string) {
   const lower = name.toLowerCase()
@@ -123,20 +139,6 @@ function scanText(text: string, filePath: string, fileName: string) {
   }
 
   return findings
-}
-
-function mergeFiles(current: File[], incoming: File[]) {
-  const seen = new Map<string, File>()
-  for (const file of current) {
-    seen.set(`${file.name}-${file.size}-${file.lastModified}`, file)
-  }
-  for (const file of incoming) {
-    const key = `${file.name}-${file.size}-${file.lastModified}`
-    if (!seen.has(key)) {
-      seen.set(key, file)
-    }
-  }
-  return Array.from(seen.values())
 }
 
 function extractIncludedFiles(text: string) {
@@ -240,7 +242,24 @@ function applyReplacement(lineText: string, matchText: string, replacement: stri
   return replaced
 }
 
+function buildEqSelectorSuggestion(lineText: string) {
+  const eqSelectorInJqueryCall =
+    /(\$jq|\$|jQuery|JQuery)\s*\(\s*(['"])([^"'\\]*?):eq\s*\(\s*(-?\d+)\s*\)([^"'\\]*?)\2\s*\)/g
+
+  const replaced = lineText.replace(
+    eqSelectorInJqueryCall,
+    (_fullMatch, jqCall: string, quote: string, before: string, index: string, after: string) =>
+      `${jqCall}(${quote}${before}${after}${quote}).eq(${index})`
+  )
+
+  return replaced === lineText ? null : replaced
+}
+
 function getSuggestedLine({ lineText, matchText, rule }: SuggestionInput) {
+  if (rule.id === 'selector-eq') {
+    return buildEqSelectorSuggestion(lineText)
+  }
+
   if (!rule.replacement || rule.type === 'selector') return null
 
   const token = extractReplacementToken(rule.replacement)
@@ -261,13 +280,29 @@ export default function App() {
     'with-findings'
   )
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(() => new Set())
+  const [progress, setProgress] = useState<ProgressState>({
+    phase: 'idle',
+    value: 0,
+    label: 'Esperando seleccion de archivos.'
+  })
 
-  const handleSelection = (fileList: FileList | null) => {
+  const handleSelection = async (fileList: FileList | null) => {
     if (!fileList) return
+    setProgress({
+      phase: 'selecting',
+      value: 10,
+      label: 'Cargando archivos seleccionados...'
+    })
+    await waitForNextPaint()
     setSelectedFiles(Array.from(fileList))
     setResults([])
     setStats(null)
     setLastScanAt(null)
+    setProgress({
+      phase: 'done',
+      value: 100,
+      label: `${fileList.length} archivo(s) listo(s) para analizar.`
+    })
   }
 
   const clearSelection = () => {
@@ -275,20 +310,37 @@ export default function App() {
     setResults([])
     setStats(null)
     setLastScanAt(null)
+    setProgress({
+      phase: 'idle',
+      value: 0,
+      label: 'Esperando seleccion de archivos.'
+    })
   }
 
   const runScan = async () => {
     if (selectedFiles.length === 0) return
     setScanning(true)
+    setProgress({
+      phase: 'scanning',
+      value: 0,
+      label: 'Iniciando analisis...'
+    })
 
     let skipped = 0
     let totalFindings = 0
     const scanResults: ScanResult[] = []
+    const totalFiles = selectedFiles.length
 
-    for (const file of selectedFiles) {
+    for (const [index, file] of selectedFiles.entries()) {
       const ext = getExtension(file.name)
       if (!allowedExtensions.includes(ext)) {
         skipped += 1
+        const progressValue = Math.round(((index + 1) / totalFiles) * 100)
+        setProgress({
+          phase: 'scanning',
+          value: progressValue,
+          label: `Analizando archivos... ${index + 1}/${totalFiles}`
+        })
         continue
       }
 
@@ -302,6 +354,13 @@ export default function App() {
       } catch {
         skipped += 1
       }
+
+      const progressValue = Math.round(((index + 1) / totalFiles) * 100)
+      setProgress({
+        phase: 'scanning',
+        value: progressValue,
+        label: `Analizando archivos... ${index + 1}/${totalFiles}`
+      })
     }
 
     const uniqueRules = new Set(
@@ -317,6 +376,11 @@ export default function App() {
     })
     setLastScanAt(new Date().toLocaleString())
     setScanning(false)
+    setProgress({
+      phase: 'done',
+      value: 100,
+      label: `Analisis completado: ${scanResults.length} archivo(s) escaneado(s), ${skipped} omitido(s).`
+    })
   }
 
   const rulesByVersion = useMemo(() => {
@@ -329,7 +393,7 @@ export default function App() {
     return Array.from(map.entries()).sort((a, b) => Number(a[0]) - Number(b[0]))
   }, [])
 
-  const groupedResults = useMemo(() => {
+  const groupedResults = useMemo<GroupedResult[]>(() => {
     return results
       .map((result) => {
         const findings: FindingWithSuggestion[] = result.findings.map((finding) => ({
@@ -350,9 +414,7 @@ export default function App() {
 
         return { ...result, findings: filtered }
       })
-      .filter(
-        (result): result is ScanResult & { findings: FindingWithSuggestion[] } => result != null
-      )
+      .filter((result): result is GroupedResult => result != null)
   }, [filterMode, results])
 
   const hasScan = results.length > 0
@@ -412,7 +474,7 @@ export default function App() {
       <header className="hero">
         <div>
           <p className="eyebrow">Migracion jQuery 3.7.1</p>
-          <h1>Migrador de codigo legacy</h1>
+          <h3>Migrador de codigo legacy</h3>
           <p className="subtitle">
             Escanea archivos JSP, JS y HTML en tu maquina y detecta APIs
             obsoletas de jQuery. Las recomendaciones salen unicamente de la
@@ -433,7 +495,7 @@ export default function App() {
 
       <section className="panel panel-wide">
         <div className="panel-header">
-          <h2>Seleccion de archivos</h2>
+          <h4>Seleccion de archivos</h4>
           <div className="panel-actions">
             <button className="ghost" onClick={clearSelection} disabled={scanning}>
               Limpiar
@@ -473,11 +535,19 @@ export default function App() {
             <p>{allowedExtensions.join(', ')}</p>
           </div>
         </div>
+        <div className="progress-card" role="status" aria-live="polite">
+          <div className="progress-head">
+            <p className="label">Progreso</p>
+            <span className="progress-value">{progress.value}%</span>
+          </div>
+          <p className="progress-label">{progress.label}</p>
+          <progress className="progress-track" max={100} value={progress.value} />
+        </div>
       </section>
 
       <section className="panel panel-wide">
         <div className="panel-header">
-          <h2>Resumen del escaneo</h2>
+          <h4>Resumen del escaneo</h4>
           <p className="muted">{lastScanAt ? `Ultimo escaneo: ${lastScanAt}` : 'Sin escanear'}</p>
         </div>
         <div className="summary-grid">
@@ -502,37 +572,39 @@ export default function App() {
 
       <section className="panel panel-wide">
         <div className="panel-header">
-          <h2>Hallazgos</h2>
+          <h4>Hallazgos</h4>
           <div className="panel-controls">
             <div className="panel-filter">
-              <span className="muted">Mostrar:</span>
-              <label>
-                <input
-                  type="radio"
-                  name="file-filter"
-                  checked={filterMode === 'with-findings'}
-                  onChange={() => setFilterMode('with-findings')}
-                />
-                Solo con incidencia
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="file-filter"
-                  checked={filterMode === 'all'}
-                  onChange={() => setFilterMode('all')}
-                />
-                Todos los archivos
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="file-filter"
-                  checked={filterMode === 'no-replacement'}
-                  onChange={() => setFilterMode('no-replacement')}
-                />
-                Sin reemplazo oficial
-              </label>
+              <span className="muted panel-filter-title">Mostrar</span>
+              <div className="filter-options" role="radiogroup" aria-label="Mostrar resultados">
+                <label className={`filter-option ${filterMode === 'with-findings' ? 'is-active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="file-filter"
+                    checked={filterMode === 'with-findings'}
+                    onChange={() => setFilterMode('with-findings')}
+                  />
+                  <span>Solo con incidencia</span>
+                </label>
+                <label className={`filter-option ${filterMode === 'all' ? 'is-active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="file-filter"
+                    checked={filterMode === 'all'}
+                    onChange={() => setFilterMode('all')}
+                  />
+                  <span>Todos los archivos</span>
+                </label>
+                <label className={`filter-option ${filterMode === 'no-replacement' ? 'is-active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="file-filter"
+                    checked={filterMode === 'no-replacement'}
+                    onChange={() => setFilterMode('no-replacement')}
+                  />
+                  <span>Sin reemplazo oficial</span>
+                </label>
+              </div>
             </div>
             <div className="panel-toggle">
               <button
@@ -560,7 +632,7 @@ export default function App() {
               <p>{emptyMessage}</p>
             </div>
           )}
-          {groupedResults.map((result) => (
+          {groupedResults.map((result: GroupedResult) => (
             <div
               key={result.filePath}
               className={`result-group ${expandedFiles.has(result.filePath) ? 'is-open' : 'is-collapsed'}`}
@@ -591,7 +663,7 @@ export default function App() {
                         <p className="muted">Sin incidencias detectadas.</p>
                       </div>
                     ) : (
-                      result.findings.map((finding, index) => {
+                      result.findings.map((finding: FindingWithSuggestion, index) => {
                         const statusParts = [`Deprecado en ${finding.rule.deprecated}`]
                         if (finding.rule.removed) {
                           statusParts.push(`Obsoleto en ${finding.rule.removed}`)
@@ -672,13 +744,13 @@ export default function App() {
 
       <section className="panel panel-wide">
         <div className="panel-header">
-          <h2>Catalogo de reglas</h2>
+          <h4>Catalogo de reglas</h4>
           <p className="muted">Revisa que versiones cubre la app actualmente.</p>
         </div>
         <div className="rules">
           {rulesByVersion.map(([version, rules]) => (
             <div key={version} className="rule-group">
-              <h3>Deprecado en {version}</h3>
+              <h5>Deprecado en {version}</h5>
               <div className="rule-grid">
                 {rules.map((rule) => (
                   <div key={rule.id} className="rule-card">

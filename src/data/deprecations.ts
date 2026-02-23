@@ -566,6 +566,39 @@ const rawRules: RawRule[] = [
     replacementUrl: 'https://api.jquery.com/ajaxStart/'
   },
   {
+    id: 'ajax-send',
+    label: '.ajaxSend()',
+    type: 'ajax-event',
+    deprecated: '3.5',
+    pattern: String.raw`\.ajaxSend\s*\(`,
+    docsUrl: 'https://api.jquery.com/ajaxSend/',
+    categoryUrl: 'https://api.jquery.com/category/deprecated/deprecated-3.5/',
+    replacement: 'Use .on("ajaxSend", handler) instead.',
+    replacementUrl: 'https://api.jquery.com/ajaxSend/'
+  },
+  {
+    id: 'ajax-stop',
+    label: '.ajaxStop()',
+    type: 'ajax-event',
+    deprecated: '3.5',
+    pattern: String.raw`\.ajaxStop\s*\(`,
+    docsUrl: 'https://api.jquery.com/ajaxStop/',
+    categoryUrl: 'https://api.jquery.com/category/deprecated/deprecated-3.5/',
+    replacement: 'Use .on("ajaxStop", handler) instead.',
+    replacementUrl: 'https://api.jquery.com/ajaxStop/'
+  },
+  {
+    id: 'ajax-success',
+    label: '.ajaxSuccess()',
+    type: 'ajax-event',
+    deprecated: '3.5',
+    pattern: String.raw`\.ajaxSuccess\s*\(`,
+    docsUrl: 'https://api.jquery.com/ajaxSuccess/',
+    categoryUrl: 'https://api.jquery.com/category/deprecated/deprecated-3.5/',
+    replacement: 'Use .on("ajaxSuccess", handler) instead.',
+    replacementUrl: 'https://api.jquery.com/ajaxSuccess/'
+  },
+  {
     id: 'trim',
     label: 'jQuery.trim()',
     type: 'utility',
