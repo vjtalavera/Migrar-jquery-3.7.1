@@ -445,6 +445,10 @@ button.small {
   align-items: start;
 }
 
+.result-body.is-single {
+  grid-template-columns: 1fr;
+}
+
 .result-findings {
   display: grid;
   gap: 4px;
@@ -569,7 +573,6 @@ button.small {
   font-size: 9px;
   line-height: 1;
   font-weight: 600;
-  text-transform: uppercase;
   letter-spacing: 0.08em;
   margin: 2px 0 1px;
 }

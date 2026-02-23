@@ -12,10 +12,20 @@ type Finding = {
   rule: DeprecationRule
 }
 
+type JQueryUsage = {
+  filePath: string
+  fileName: string
+  line: number
+  column: number
+  lineText: string
+  matchText: string
+}
+
 type ScanResult = {
   filePath: string
   fileName: string
   findings: Finding[]
+  jqueryUsages: JQueryUsage[]
   includes: IncludeEntry[]
 }
 
@@ -23,6 +33,7 @@ type ScanStats = {
   scannedFiles: number
   skippedFiles: number
   totalFindings: number
+  totalJQueryUsages: number
   uniqueRules: number
 }
 
@@ -46,6 +57,10 @@ type GroupedResult = Omit<ScanResult, 'findings'> & {
   findings: FindingWithSuggestion[]
 }
 
+type GroupedUsageResult = Omit<ScanResult, 'jqueryUsages'> & {
+  findings: JQueryUsage[]
+}
+
 type ProgressState = {
   phase: 'idle' | 'selecting' | 'scanning' | 'done'
   value: number
@@ -63,6 +78,7 @@ const allowedExtensions = [
 ]
 
 const maxFindingsPerFile = Number.POSITIVE_INFINITY
+const jqueryUsagePattern = String.raw`(?:\$jq|jQuery|JQuery)\s*(?:\(|\.)|\$\s*(?:\(|\.)|\$[A-Za-z_][\w$]*\s*\.`
 
 const folderInputProps =
   { webkitdirectory: '' } as InputHTMLAttributes<HTMLInputElement> & {
@@ -141,6 +157,35 @@ function scanText(text: string, filePath: string, fileName: string) {
   return findings
 }
 
+function scanJQueryUsages(text: string, filePath: string, fileName: string) {
+  const lineStarts = buildLineIndex(text)
+  const usages: JQueryUsage[] = []
+
+  for (let lineIdx = 0; lineIdx < lineStarts.length; lineIdx += 1) {
+    if (usages.length >= maxFindingsPerFile) break
+    const start = lineStarts[lineIdx]
+    const end = lineIdx + 1 < lineStarts.length ? lineStarts[lineIdx + 1] - 1 : text.length
+    const lineText = text.slice(start, end).replace(/\r$/, '')
+    if (!isJQueryInstruction(lineText)) continue
+
+    const matches = lineText.matchAll(new RegExp(jqueryUsagePattern, 'g'))
+    for (const match of matches) {
+      if (match.index == null) continue
+      if (usages.length >= maxFindingsPerFile) break
+      usages.push({
+        filePath,
+        fileName,
+        line: lineIdx + 1,
+        column: match.index + 1,
+        lineText,
+        matchText: match[0]
+      })
+    }
+  }
+
+  return usages
+}
+
 function extractIncludedFiles(text: string) {
   const includes: IncludeEntry[] = []
   const seen = new Set<string>()
@@ -179,13 +224,7 @@ function extractIncludedFiles(text: string) {
 }
 
 function isJQueryInstruction(lineText: string) {
-  const trimmed = lineText.trimStart()
-  return (
-    trimmed.startsWith('$jq') ||
-    trimmed.startsWith('$') ||
-    trimmed.startsWith('JQuery') ||
-    trimmed.startsWith('jQuery')
-  )
+  return new RegExp(jqueryUsagePattern).test(lineText)
 }
 
 function extractReplacementToken(replacement: string) {
@@ -276,6 +315,7 @@ export default function App() {
   const [stats, setStats] = useState<ScanStats | null>(null)
   const [scanning, setScanning] = useState(false)
   const [lastScanAt, setLastScanAt] = useState<string | null>(null)
+  const [resultMode, setResultMode] = useState<'deprecated' | 'jquery-usage'>('deprecated')
   const [filterMode, setFilterMode] = useState<'with-findings' | 'all' | 'no-replacement'>(
     'with-findings'
   )
@@ -328,6 +368,7 @@ export default function App() {
 
     let skipped = 0
     let totalFindings = 0
+    let totalJQueryUsages = 0
     const scanResults: ScanResult[] = []
     const totalFiles = selectedFiles.length
 
@@ -348,9 +389,11 @@ export default function App() {
         const text = await file.text()
         const filePath = file.webkitRelativePath || file.name
         const findings = scanText(text, filePath, file.name)
+        const jqueryUsages = scanJQueryUsages(text, filePath, file.name)
         const includes = extractIncludedFiles(text)
         totalFindings += findings.length
-        scanResults.push({ filePath, fileName: file.name, findings, includes })
+        totalJQueryUsages += jqueryUsages.length
+        scanResults.push({ filePath, fileName: file.name, findings, jqueryUsages, includes })
       } catch {
         skipped += 1
       }
@@ -372,6 +415,7 @@ export default function App() {
       scannedFiles: scanResults.length,
       skippedFiles: skipped,
       totalFindings,
+      totalJQueryUsages,
       uniqueRules
     })
     setLastScanAt(new Date().toLocaleString())
@@ -417,9 +461,22 @@ export default function App() {
       .filter((result): result is GroupedResult => result != null)
   }, [filterMode, results])
 
+  const groupedUsageResults = useMemo<GroupedUsageResult[]>(() => {
+    return results
+      .map((result) => {
+        if (result.jqueryUsages.length === 0) return null
+        return { ...result, findings: result.jqueryUsages }
+      })
+      .filter((result): result is GroupedUsageResult => result != null)
+  }, [results])
+
+  const activeResults = resultMode === 'deprecated' ? groupedResults : groupedUsageResults
+
   const hasScan = results.length > 0
   const emptyMessage = hasScan
-    ? 'No hay incidencias para el filtro seleccionado.'
+    ? resultMode === 'deprecated'
+      ? 'No hay incidencias para el filtro seleccionado.'
+      : 'No se detecto uso de jQuery en los archivos analizados.'
     : 'No hay resultados aun. Selecciona archivos y ejecuta el escaneo.'
 
   const includeLabel = (include: IncludeEntry) =>
@@ -437,8 +494,8 @@ export default function App() {
   }
 
   const visibleFilePaths = useMemo(
-    () => groupedResults.map((result) => result.filePath),
-    [groupedResults]
+    () => activeResults.map((result) => result.filePath),
+    [activeResults]
   )
 
   useEffect(() => {
@@ -564,6 +621,10 @@ export default function App() {
             <p>{stats?.totalFindings ?? 0}</p>
           </div>
           <div>
+            <p className="label">Uso jQuery detectado</p>
+            <p>{stats?.totalJQueryUsages ?? 0}</p>
+          </div>
+          <div>
             <p className="label">Reglas unicas</p>
             <p>{stats?.uniqueRules ?? 0}</p>
           </div>
@@ -576,6 +637,27 @@ export default function App() {
           <div className="panel-controls">
             <div className="panel-filter">
               <span className="muted panel-filter-title">Mostrar</span>
+              <div className="filter-options" role="radiogroup" aria-label="Tipo de hallazgo">
+                <label className={`filter-option ${resultMode === 'deprecated' ? 'is-active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="result-mode"
+                    checked={resultMode === 'deprecated'}
+                    onChange={() => setResultMode('deprecated')}
+                  />
+                  <span>Deprecaciones</span>
+                </label>
+                <label className={`filter-option ${resultMode === 'jquery-usage' ? 'is-active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="result-mode"
+                    checked={resultMode === 'jquery-usage'}
+                    onChange={() => setResultMode('jquery-usage')}
+                  />
+                  <span>Uso jQuery detectado</span>
+                </label>
+              </div>
+              {resultMode === 'deprecated' && (
               <div className="filter-options" role="radiogroup" aria-label="Mostrar resultados">
                 <label className={`filter-option ${filterMode === 'with-findings' ? 'is-active' : ''}`}>
                   <input
@@ -605,13 +687,14 @@ export default function App() {
                   <span>Sin reemplazo oficial</span>
                 </label>
               </div>
+              )}
             </div>
             <div className="panel-toggle">
               <button
                 className="ghost small"
                 type="button"
                 onClick={expandAll}
-                disabled={groupedResults.length === 0}
+                disabled={activeResults.length === 0}
               >
                 Desplegar todo
               </button>
@@ -619,7 +702,7 @@ export default function App() {
                 className="ghost small"
                 type="button"
                 onClick={collapseAll}
-                disabled={groupedResults.length === 0}
+                disabled={activeResults.length === 0}
               >
                 Recoger todo
               </button>
@@ -627,12 +710,13 @@ export default function App() {
           </div>
         </div>
         <div className="results">
-          {groupedResults.length === 0 && (
+          {activeResults.length === 0 && (
             <div className="empty">
               <p>{emptyMessage}</p>
             </div>
           )}
-          {groupedResults.map((result: GroupedResult) => (
+          {resultMode === 'deprecated' &&
+            groupedResults.map((result: GroupedResult) => (
             <div
               key={result.filePath}
               className={`result-group ${expandedFiles.has(result.filePath) ? 'is-open' : 'is-collapsed'}`}
@@ -735,6 +819,54 @@ export default function App() {
                       </div>
                     )}
                   </aside>
+                </div>
+              )}
+            </div>
+          ))}
+          {resultMode === 'jquery-usage' &&
+            groupedUsageResults.map((result: GroupedUsageResult) => (
+            <div
+              key={result.filePath}
+              className={`result-group ${expandedFiles.has(result.filePath) ? 'is-open' : 'is-collapsed'}`}
+            >
+              <div
+                className="result-header"
+                role="button"
+                tabIndex={0}
+                onClick={() => toggleFile(result.filePath)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    toggleFile(result.filePath)
+                  }
+                }}
+              >
+                <span className="result-path">Ruta: {result.filePath}</span>
+                <span className="result-count">
+                  {result.findings.length} uso{result.findings.length === 1 ? '' : 's'}
+                </span>
+              </div>
+              {expandedFiles.has(result.filePath) && (
+                <div className="result-body is-single">
+                  <div className="result-findings">
+                    {result.findings.map((finding: JQueryUsage, index) => (
+                      <div key={`${result.filePath}-${finding.line}-${index}`} className="finding">
+                        <p>Uso de jQuery detectado (no deprecado) | Modulo: usage</p>
+                        <div className="finding-row">
+                          <span className="finding-label finding-label-locate">
+                            Elemento localizado (linea {finding.line})
+                          </span>
+                          <span className="finding-label finding-label-suggest">
+                            Observacion
+                          </span>
+                        </div>
+                        <div className="finding-row">
+                          <span className="mono">{finding.lineText || finding.matchText}</span>
+                          <span className="mono">Sin reemplazo: esta linea no coincide con una deprecacion oficial.</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
