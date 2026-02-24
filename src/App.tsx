@@ -31,6 +31,7 @@ type SuggestionInput = {
   lineText: string
   matchText: string
   rule: DeprecationRule
+  column: number
 }
 
 type IncludeEntry = {
@@ -122,12 +123,16 @@ function scanText(text: string, filePath: string, fileName: string) {
   const findings: Finding[] = []
 
   for (const rule of deprecationRules) {
-    const matches = text.matchAll(rule.pattern)
+    const pattern = new RegExp(rule.pattern.source, rule.pattern.flags)
+    const matches = text.matchAll(pattern)
     for (const match of matches) {
       if (match.index == null) continue
       if (findings.length >= maxFindingsPerFile) break
       const info = findLineInfo(text, lineStarts, match.index)
       if (!isJQueryInstruction(info.lineText)) continue
+      if (rule.ambiguous && match[0].startsWith('.') && !hasLikelyJQueryReceiver(info.lineText, info.column)) {
+        continue
+      }
       findings.push({
         filePath,
         fileName,
@@ -192,6 +197,23 @@ function isJQueryInstruction(lineText: string) {
     /(?:^|[^\w$])\$[A-Za-z_][\w$]*\s*\./.test(lineText)
 
   return hasCoreCall || hasDollarObjectMethod
+}
+
+function hasLikelyJQueryReceiver(lineText: string, column: number) {
+  const matchStart = Math.max(0, column - 1)
+  const beforeMatch = lineText.slice(0, matchStart).trimEnd()
+  if (!beforeMatch) return false
+
+  const aliasCallChainReceiver =
+    /(?:\$jq|\$|jQuery|JQuery)\s*\([^)]*\)\s*(?:\.\s*[A-Za-z_$][\w$]*\s*\([^)]*\))*\s*$/.test(
+      beforeMatch
+    )
+  if (aliasCallChainReceiver) return true
+
+  const dollarVariableChainReceiver =
+    /\$[A-Za-z_][\w$]*\s*(?:\.\s*[A-Za-z_$][\w$]*\s*\([^)]*\))*\s*$/.test(beforeMatch)
+
+  return dollarVariableChainReceiver
 }
 
 function extractReplacementToken(replacement: string) {
@@ -261,6 +283,53 @@ function buildEqSelectorSuggestion(lineText: string) {
   return replaced === lineText ? null : replaced
 }
 
+function buildSimpleSelectorMethodSuggestion(
+  lineText: string,
+  pseudo: 'first' | 'last' | 'even' | 'odd',
+  method: 'first' | 'last' | 'even' | 'odd'
+) {
+  const pseudoSelectorInJqueryCall = new RegExp(
+    `(\\$jq|\\$|jQuery|JQuery)\\s*\\(\\s*(['"])([^"'\\\\]*?):${pseudo}([^"'\\\\]*?)\\2\\s*\\)`,
+    'g'
+  )
+
+  const replaced = lineText.replace(
+    pseudoSelectorInJqueryCall,
+    (_fullMatch, jqCall: string, quote: string, before: string, after: string) =>
+      `${jqCall}(${quote}${before}${after}${quote}).${method}()`
+  )
+
+  return replaced === lineText ? null : replaced
+}
+
+function buildGtSelectorSuggestion(lineText: string) {
+  const gtSelectorInJqueryCall =
+    /(\$jq|\$|jQuery|JQuery)\s*\(\s*(['"])([^"'\\]*?):gt\s*\(\s*(-?\d+)\s*\)([^"'\\]*?)\2\s*\)/g
+
+  const replaced = lineText.replace(
+    gtSelectorInJqueryCall,
+    (_fullMatch, jqCall: string, quote: string, before: string, index: string, after: string) => {
+      const nextIndex = Number(index) + 1
+      return `${jqCall}(${quote}${before}${after}${quote}).slice(${nextIndex})`
+    }
+  )
+
+  return replaced === lineText ? null : replaced
+}
+
+function buildLtSelectorSuggestion(lineText: string) {
+  const ltSelectorInJqueryCall =
+    /(\$jq|\$|jQuery|JQuery)\s*\(\s*(['"])([^"'\\]*?):lt\s*\(\s*(-?\d+)\s*\)([^"'\\]*?)\2\s*\)/g
+
+  const replaced = lineText.replace(
+    ltSelectorInJqueryCall,
+    (_fullMatch, jqCall: string, quote: string, before: string, index: string, after: string) =>
+      `${jqCall}(${quote}${before}${after}${quote}).slice(0, ${index})`
+  )
+
+  return replaced === lineText ? null : replaced
+}
+
 function buildReadyOnSuggestion(lineText: string) {
   const readyEventPattern = /\.on\s*\(\s*(['"])ready\1\s*,\s*([^)]+)\)/i
   if (!readyEventPattern.test(lineText)) return null
@@ -285,8 +354,18 @@ function buildReadyMethodSuggestion(lineText: string) {
 }
 
 function buildAttrPropSuggestion(lineText: string) {
-  const attrPropertyPattern = /\.attr\s*\(\s*(['"])(disabled|checked|selected)\1/i
+  const attrPropertyPattern = /\.attr\s*\(\s*(['"])(disabled|checked|selected|readonly)\1/i
   if (!attrPropertyPattern.test(lineText)) return null
+
+  const attrBooleanSetterPattern =
+    /\.attr\s*\(\s*(['"])(disabled|checked|selected|readonly)\1\s*,\s*(['"])\2\3\s*\)/i
+  if (attrBooleanSetterPattern.test(lineText)) {
+    const replaced = lineText.replace(
+      attrBooleanSetterPattern,
+      (_fullMatch, quote: string, propName: string) => `.prop(${quote}${propName}${quote}, true)`
+    )
+    return replaced === lineText ? null : replaced
+  }
 
   const replaced = lineText.replace(
     attrPropertyPattern,
@@ -295,9 +374,27 @@ function buildAttrPropSuggestion(lineText: string) {
   return replaced === lineText ? null : replaced
 }
 
-function buildEventShorthandSuggestion(lineText: string, matchText: string, rule: DeprecationRule) {
+function buildRemoveAttrPropSuggestion(lineText: string) {
+  const removeAttrPropertyPattern =
+    /\.removeAttr\s*\(\s*(['"])(disabled|checked|selected|readonly)\1\s*\)/i
+  if (!removeAttrPropertyPattern.test(lineText)) return null
+
+  const replaced = lineText.replace(
+    removeAttrPropertyPattern,
+    (_fullMatch, quote: string, propName: string) => `.prop(${quote}${propName}${quote}, false)`
+  )
+  return replaced === lineText ? null : replaced
+}
+
+function buildEventShorthandSuggestion(
+  lineText: string,
+  matchText: string,
+  rule: DeprecationRule,
+  column: number
+) {
   if (rule.type !== 'event' || !rule.replacement) return null
   if (!rule.replacement.includes('.on(') || !rule.replacement.includes('.trigger(')) return null
+  if (!hasLikelyJQueryReceiver(lineText, column)) return null
 
   const methodMatch = matchText.match(/\.([A-Za-z_$][\w$]*)\s*\(/)
   if (!methodMatch) return null
@@ -313,15 +410,36 @@ function buildEventShorthandSuggestion(lineText: string, matchText: string, rule
   return lineText.replace(callPattern, `.on('${method}', `)
 }
 
-function getSuggestedLine({ lineText, matchText, rule }: SuggestionInput) {
+function getSuggestedLine({ lineText, matchText, rule, column }: SuggestionInput) {
   if (rule.id === 'selector-eq') {
     return buildEqSelectorSuggestion(lineText)
+  }
+  if (rule.id === 'selector-first') {
+    return buildSimpleSelectorMethodSuggestion(lineText, 'first', 'first')
+  }
+  if (rule.id === 'selector-last') {
+    return buildSimpleSelectorMethodSuggestion(lineText, 'last', 'last')
+  }
+  if (rule.id === 'selector-even') {
+    return buildSimpleSelectorMethodSuggestion(lineText, 'even', 'even')
+  }
+  if (rule.id === 'selector-odd') {
+    return buildSimpleSelectorMethodSuggestion(lineText, 'odd', 'odd')
+  }
+  if (rule.id === 'selector-gt') {
+    return buildGtSelectorSuggestion(lineText)
+  }
+  if (rule.id === 'selector-lt') {
+    return buildLtSelectorSuggestion(lineText)
   }
   if (rule.id === 'off-handler-removal') {
     return lineText
   }
   if (rule.id === 'attr-boolean-property') {
     return buildAttrPropSuggestion(lineText)
+  }
+  if (rule.id === 'removeattr-boolean-property') {
+    return buildRemoveAttrPropSuggestion(lineText)
   }
   if (rule.id === 'ready-event-on') {
     return buildReadyOnSuggestion(lineText)
@@ -330,7 +448,7 @@ function getSuggestedLine({ lineText, matchText, rule }: SuggestionInput) {
     return buildReadyMethodSuggestion(lineText)
   }
 
-  const eventShorthandSuggestion = buildEventShorthandSuggestion(lineText, matchText, rule)
+  const eventShorthandSuggestion = buildEventShorthandSuggestion(lineText, matchText, rule, column)
   if (eventShorthandSuggestion) {
     return eventShorthandSuggestion
   }
@@ -357,6 +475,7 @@ export default function App() {
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(() => new Set())
   const [activeLineByFile, setActiveLineByFile] = useState<Record<string, number>>({})
   const codeViewerRefs = useRef(new Map<string, HTMLDivElement | null>())
+  const resultGroupRefs = useRef(new Map<string, HTMLDivElement | null>())
   const [progress, setProgress] = useState<ProgressState>({
     phase: 'idle',
     value: 0,
@@ -477,16 +596,48 @@ export default function App() {
   const groupedResults = useMemo<GroupedResult[]>(() => {
     return results
       .map((result) => {
-        const findings: FindingWithSuggestion[] = [...result.findings]
-          .sort((a, b) => {
-            if (a.line !== b.line) return a.line - b.line
-            if (a.column !== b.column) return a.column - b.column
-            return a.rule.label.localeCompare(b.rule.label)
-          })
-          .map((finding) => ({
-            ...finding,
-            suggestedLine: getSuggestedLine(finding)
-          }))
+        const sortedFindings = [...result.findings].sort((a, b) => {
+          if (a.line !== b.line) return a.line - b.line
+          if (a.column !== b.column) return a.column - b.column
+          return a.rule.label.localeCompare(b.rule.label)
+        })
+
+        const suggestionsByIndex = new Map<number, string | null>()
+        let start = 0
+        while (start < sortedFindings.length) {
+          const targetLine = sortedFindings[start].line
+          let end = start
+          while (end < sortedFindings.length && sortedFindings[end].line === targetLine) {
+            end += 1
+          }
+
+          let evolvingLine = sortedFindings[start].lineText
+          const hasSuggestionByIndex = new Map<number, boolean>()
+          for (let index = start; index < end; index += 1) {
+            const finding = sortedFindings[index]
+            const suggestion = getSuggestedLine({
+              lineText: evolvingLine,
+              matchText: finding.matchText,
+              rule: finding.rule,
+              column: finding.column
+            })
+            hasSuggestionByIndex.set(index, suggestion != null)
+            if (suggestion) {
+              evolvingLine = suggestion
+            }
+          }
+
+          for (let index = start; index < end; index += 1) {
+            suggestionsByIndex.set(index, hasSuggestionByIndex.get(index) ? evolvingLine : null)
+          }
+
+          start = end
+        }
+
+        const findings: FindingWithSuggestion[] = sortedFindings.map((finding, index) => ({
+          ...finding,
+          suggestedLine: suggestionsByIndex.get(index) ?? null
+        }))
 
         let filtered = findings
         if (filterMode === 'with-findings') {
@@ -554,6 +705,26 @@ export default function App() {
 
   const setCodeViewerRef = (filePath: string, element: HTMLDivElement | null) => {
     codeViewerRefs.current.set(filePath, element)
+  }
+
+  const setResultGroupRef = (filePath: string, element: HTMLDivElement | null) => {
+    resultGroupRefs.current.set(filePath, element)
+  }
+
+  const jumpToFileResult = (filePath: string) => {
+    setFilterMode('all')
+    setExpandedFiles((prev) => {
+      const next = new Set(prev)
+      next.add(filePath)
+      return next
+    })
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const resultGroup = resultGroupRefs.current.get(filePath)
+        if (!resultGroup) return
+        resultGroup.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      })
+    })
   }
 
   const jumpToLine = (filePath: string, line: number) => {
@@ -734,6 +905,7 @@ export default function App() {
             <div
               key={result.filePath}
               className={`result-group ${expandedFiles.has(result.filePath) ? 'is-open' : 'is-collapsed'}`}
+              ref={(element) => setResultGroupRef(result.filePath, element)}
             >
               <div
                 className="result-header"
@@ -846,29 +1018,58 @@ export default function App() {
 
                           return (
                             <div key={`${header}-${includeIndex}`} className="included-item">
-                              <div className="included-header">{header}</div>
+                              <div className="included-header">
+                                {includeResult == null ? (
+                                  <span className="included-header-text">{header}</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="included-header-link included-header-text"
+                                    onClick={() => jumpToFileResult(includeResult.filePath)}
+                                    aria-label={`Ir al archivo ${includeResult.filePath}`}
+                                    title={`Ir al archivo ${includeResult.filePath}`}
+                                  >
+                                    {header}
+                                  </button>
+                                )}
+                                {includeResult == null ? null : (
+                                  includeFindings.length > 0 ? (
+                                    <span
+                                      className="included-count-badge"
+                                      aria-label={`Incidencias localizadas: ${includeFindings.length}`}
+                                      title={`Incidencias localizadas: ${includeFindings.length}`}
+                                    >
+                                      {includeFindings.length}
+                                    </span>
+                                  ) : null
+                                )}
+                              </div>
                               {includeResult == null ? (
                                 <p className="muted">Archivo no escaneado.</p>
-                              ) : includeFindings.length === 0 ? null : (
-                                <div className="included-findings">
-                                  {includeFindings.map((finding) => (
-                                    <div
-                                      key={`${includeResult.filePath}-${finding.line}-${finding.rule.id}`}
-                                      className="included-issue"
-                                    >
-                                      <div className="included-issue-line included-issue-path">
-                                        Archivo: {includeResult.filePath} · Linea {finding.line}
-                                      </div>
-                                      <div className="included-issue-line included-issue-rule">
-                                        Incidencia: {finding.rule.label}
-                                      </div>
-                                      <div className="included-issue-line included-issue-solution">
-                                        Solucion:{' '}
-                                        {finding.rule.replacement ?? 'No hay reemplazo oficial indicado.'}
-                                      </div>
+                              ) : (
+                                <>
+                                  {includeFindings.length === 0 ? null : (
+                                    <div className="included-findings">
+                                      {includeFindings.map((finding) => (
+                                        <div
+                                          key={`${includeResult.filePath}-${finding.line}-${finding.rule.id}`}
+                                          className="included-issue"
+                                        >
+                                          <div className="included-issue-line included-issue-path">
+                                            Archivo: {includeResult.filePath} · Linea {finding.line}
+                                          </div>
+                                          <div className="included-issue-line included-issue-rule">
+                                            Incidencia: {finding.rule.label}
+                                          </div>
+                                          <div className="included-issue-line included-issue-solution">
+                                            Solucion:{' '}
+                                            {finding.rule.replacement ?? 'No hay reemplazo oficial indicado.'}
+                                          </div>
+                                        </div>
+                                      ))}
                                     </div>
-                                  ))}
-                                </div>
+                                  )}
+                                </>
                               )}
                             </div>
                           )
