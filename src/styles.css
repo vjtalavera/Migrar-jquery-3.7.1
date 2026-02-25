@@ -1,4 +1,4 @@
-﻿﻿﻿﻿:root {
+﻿﻿﻿﻿﻿:root {
   font-family: 'Space Grotesk', system-ui, sans-serif;
   color: #0f172a;
   background-color: #f5f3ef;
@@ -429,12 +429,19 @@ button.small {
   font-size: 13px;
 }
 
+.result-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .result-group.is-collapsed {
   opacity: 0.85;
 }
 
 .result-header .result-count {
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .result-body {

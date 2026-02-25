@@ -295,6 +295,18 @@ const rawRules: RawRule[] = [
     replacementUrl: 'https://api.jquery.com/prop/'
   },
   {
+    id: 'attr-inline-onclick-clear',
+    label: '.attr("onclick", "")',
+    kind: 'recommended',
+    type: 'property',
+    deprecated: '1.6',
+    pattern: String.raw`\.attr\s*\(\s*(['"])onclick\1\s*,\s*(?:(['"])\s*\2|null)\s*\)`,
+    docsUrl: 'https://api.jquery.com/attr/',
+    categoryUrl: 'https://api.jquery.com/attr/',
+    replacement: 'Use .prop("onclick", null) and .off("click") for jQuery handlers.',
+    replacementUrl: 'https://api.jquery.com/prop/'
+  },
+  {
     id: 'removeattr-boolean-property',
     label: '.removeAttr("disabled|checked|selected|readonly")',
     kind: 'recommended',
@@ -585,7 +597,7 @@ const rawRules: RawRule[] = [
     label: 'jQuery.isFunction()',
     type: 'utility',
     deprecated: '3.3',
-    pattern: String.raw`\b(?:\$jq|jQuery|JQuery|\$)\s*\.\s*isFunction\s*\(`,
+    pattern: String.raw`(?:\$[A-Za-z_][\w$]*|\$|jQuery|JQuery|jq)\s*\.\s*isFunction\s*\(`,
     docsUrl: 'https://api.jquery.com/jQuery.isFunction/',
     categoryUrl: 'https://api.jquery.com/category/deprecated/deprecated-3.3/',
     replacement: 'Use typeof x === "function" instead.',

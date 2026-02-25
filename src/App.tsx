@@ -17,6 +17,7 @@ type ScanResult = {
   fileName: string
   findings: Finding[]
   fileLines: string[]
+  originalText: string
   includes: IncludeEntry[]
 }
 
@@ -386,6 +387,28 @@ function buildRemoveAttrPropSuggestion(lineText: string) {
   return replaced === lineText ? null : replaced
 }
 
+function buildInlineOnclickClearSuggestion(lineText: string) {
+  const inlineOnclickAttrPattern =
+    /\.attr\s*\(\s*(['"])onclick\1\s*,\s*(?:(['"])\s*\2|null)\s*\)/i
+  if (!inlineOnclickAttrPattern.test(lineText)) return null
+
+  const replaced = lineText.replace(
+    inlineOnclickAttrPattern,
+    (_fullMatch, quote: string) => `.prop(${quote}onclick${quote}, null)`
+  )
+  return replaced === lineText ? null : replaced
+}
+
+function buildIsFunctionSuggestion(lineText: string) {
+  const isFunctionPattern = /(?:\$[A-Za-z_][\w$]*|\$|jQuery|JQuery|jq)\s*\.\s*isFunction\s*\(\s*([^)]+?)\s*\)/g
+
+  const replaced = lineText.replace(
+    isFunctionPattern,
+    (_fullMatch, expression: string) => `typeof ${expression.trim()} === 'function'`
+  )
+  return replaced === lineText ? null : replaced
+}
+
 function buildEventShorthandSuggestion(
   lineText: string,
   matchText: string,
@@ -441,11 +464,17 @@ function getSuggestedLine({ lineText, matchText, rule, column }: SuggestionInput
   if (rule.id === 'removeattr-boolean-property') {
     return buildRemoveAttrPropSuggestion(lineText)
   }
+  if (rule.id === 'attr-inline-onclick-clear') {
+    return buildInlineOnclickClearSuggestion(lineText)
+  }
   if (rule.id === 'ready-event-on') {
     return buildReadyOnSuggestion(lineText)
   }
   if (rule.id === 'ready-method-equivalent') {
     return buildReadyMethodSuggestion(lineText)
+  }
+  if (rule.id === 'isFunction') {
+    return buildIsFunctionSuggestion(lineText)
   }
 
   const eventShorthandSuggestion = buildEventShorthandSuggestion(lineText, matchText, rule, column)
@@ -461,6 +490,110 @@ function getSuggestedLine({ lineText, matchText, rule, column }: SuggestionInput
   const normalized = normalizeReplacementToken(token, matchText)
   const replaced = applyReplacement(lineText, matchText, normalized)
   return replaced === lineText ? null : replaced
+}
+
+function sortFindingsByPosition(findings: Finding[]) {
+  return [...findings].sort((a, b) => {
+    if (a.line !== b.line) return a.line - b.line
+    if (a.column !== b.column) return a.column - b.column
+    return a.rule.label.localeCompare(b.rule.label)
+  })
+}
+
+function buildFindingsWithSuggestions(findings: Finding[]): FindingWithSuggestion[] {
+  const sortedFindings = sortFindingsByPosition(findings)
+  const suggestionsByIndex = new Map<number, string | null>()
+
+  let start = 0
+  while (start < sortedFindings.length) {
+    const targetLine = sortedFindings[start].line
+    let end = start
+    while (end < sortedFindings.length && sortedFindings[end].line === targetLine) {
+      end += 1
+    }
+
+    let evolvingLine = sortedFindings[start].lineText
+    for (let index = start; index < end; index += 1) {
+      const finding = sortedFindings[index]
+      const suggestion = getSuggestedLine({
+        lineText: evolvingLine,
+        matchText: finding.matchText,
+        rule: finding.rule,
+        column: finding.column
+      })
+      suggestionsByIndex.set(index, suggestion)
+      if (suggestion) {
+        evolvingLine = suggestion
+      }
+    }
+
+    start = end
+  }
+
+  return sortedFindings.map((finding, index) => ({
+    ...finding,
+    suggestedLine: suggestionsByIndex.get(index) ?? null
+  }))
+}
+
+function buildCorrectedFileContent(result: ScanResult) {
+  const findingsWithSuggestions = buildFindingsWithSuggestions(result.findings)
+  const latestSuggestionByLine = new Map<number, string>()
+
+  for (const finding of findingsWithSuggestions) {
+    if (finding.suggestedLine) {
+      latestSuggestionByLine.set(finding.line, finding.suggestedLine)
+    }
+  }
+
+  const lines: Array<{ content: string; ending: string }> = []
+  let start = 0
+  while (start < result.originalText.length) {
+    const lineFeedIndex = result.originalText.indexOf('\n', start)
+    if (lineFeedIndex === -1) {
+      lines.push({ content: result.originalText.slice(start), ending: '' })
+      start = result.originalText.length
+      continue
+    }
+
+    const hasCarriageReturn =
+      lineFeedIndex > start && result.originalText[lineFeedIndex - 1] === '\r'
+    const contentEnd = hasCarriageReturn ? lineFeedIndex - 1 : lineFeedIndex
+    const ending = hasCarriageReturn ? '\r\n' : '\n'
+    lines.push({ content: result.originalText.slice(start, contentEnd), ending })
+    start = lineFeedIndex + 1
+  }
+
+  for (const [lineNumber, suggestedLine] of latestSuggestionByLine) {
+    const lineIndex = lineNumber - 1
+    if (lineIndex >= 0 && lineIndex < lines.length) {
+      lines[lineIndex].content = suggestedLine
+    }
+  }
+
+  return lines.map((line) => `${line.content}${line.ending}`).join('')
+}
+
+function getCorrectedFileName(fileName: string) {
+  const dotIndex = fileName.lastIndexOf('.')
+  if (dotIndex <= 0) {
+    return `${fileName}.corregido`
+  }
+  const base = fileName.slice(0, dotIndex)
+  const extension = fileName.slice(dotIndex)
+  return `${base}.corregido${extension}`
+}
+
+function downloadTextFile(fileName: string, content: string) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
 }
 
 export default function App() {
@@ -549,7 +682,14 @@ export default function App() {
         const fileLines = toFileLines(text)
         const includes = extractIncludedFiles(text)
         totalFindings += findings.length
-        scanResults.push({ filePath, fileName: file.name, findings, fileLines, includes })
+        scanResults.push({
+          filePath,
+          fileName: file.name,
+          findings,
+          fileLines,
+          originalText: text,
+          includes
+        })
       } catch {
         skipped += 1
       }
@@ -596,48 +736,7 @@ export default function App() {
   const groupedResults = useMemo<GroupedResult[]>(() => {
     return results
       .map((result) => {
-        const sortedFindings = [...result.findings].sort((a, b) => {
-          if (a.line !== b.line) return a.line - b.line
-          if (a.column !== b.column) return a.column - b.column
-          return a.rule.label.localeCompare(b.rule.label)
-        })
-
-        const suggestionsByIndex = new Map<number, string | null>()
-        let start = 0
-        while (start < sortedFindings.length) {
-          const targetLine = sortedFindings[start].line
-          let end = start
-          while (end < sortedFindings.length && sortedFindings[end].line === targetLine) {
-            end += 1
-          }
-
-          let evolvingLine = sortedFindings[start].lineText
-          const hasSuggestionByIndex = new Map<number, boolean>()
-          for (let index = start; index < end; index += 1) {
-            const finding = sortedFindings[index]
-            const suggestion = getSuggestedLine({
-              lineText: evolvingLine,
-              matchText: finding.matchText,
-              rule: finding.rule,
-              column: finding.column
-            })
-            hasSuggestionByIndex.set(index, suggestion != null)
-            if (suggestion) {
-              evolvingLine = suggestion
-            }
-          }
-
-          for (let index = start; index < end; index += 1) {
-            suggestionsByIndex.set(index, hasSuggestionByIndex.get(index) ? evolvingLine : null)
-          }
-
-          start = end
-        }
-
-        const findings: FindingWithSuggestion[] = sortedFindings.map((finding, index) => ({
-          ...finding,
-          suggestedLine: suggestionsByIndex.get(index) ?? null
-        }))
+        const findings = buildFindingsWithSuggestions(result.findings)
 
         let filtered = findings
         if (filterMode === 'with-findings') {
@@ -662,6 +761,14 @@ export default function App() {
 
   const includeLabel = (include: IncludeEntry) =>
     `${include.kind} ${include.attr}: ${include.value}`
+
+  const downloadCorrectedResult = (filePath: string) => {
+    const sourceResult = results.find((result) => result.filePath === filePath)
+    if (!sourceResult) return
+    const correctedContent = buildCorrectedFileContent(sourceResult)
+    const correctedFileName = getCorrectedFileName(sourceResult.fileName)
+    downloadTextFile(correctedFileName, correctedContent)
+  }
 
   const findIncludeResult = (value: string) => {
     const normalized = value.replace(/^[.\\/]+/, '')
@@ -920,10 +1027,26 @@ export default function App() {
                 }}
               >
                 <span className="result-path">Ruta: {result.filePath}</span>
-                <span className="result-count">
-                  {result.findings.length} incidencia
-                  {result.findings.length === 1 ? '' : 's'}
-                </span>
+                <div className="result-header-actions">
+                  <span className="result-count">
+                    {result.findings.length} incidencia
+                    {result.findings.length === 1 ? '' : 's'}
+                  </span>
+                  <button
+                    type="button"
+                    className="ghost small"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      downloadCorrectedResult(result.filePath)
+                    }}
+                    onKeyDown={(event) => {
+                      event.stopPropagation()
+                    }}
+                    aria-label={`Descargar archivo corregido de ${result.fileName}`}
+                  >
+                    Descargar corregido
+                  </button>
+                </div>
               </div>
               {expandedFiles.has(result.filePath) && (
                 <>
@@ -1125,4 +1248,3 @@ export default function App() {
     </div>
   )
 }
-
